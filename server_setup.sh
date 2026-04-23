@@ -86,10 +86,10 @@ chmod 640 /etc/dhcp/dhcpd.keytab
 cat > /etc/dhcp/dhcpd.conf << EOF
 ddns-update-style interim;
 ddns-updates on;
-ddns-domainname "test-alt";
+ddns-domainname "test.alt";
 ddns-rev-domainname "in-addr.arpa";
 
-zone test-alt. {
+zone test.alt. {
     primary 127.0.0.1;
     key dhcpuser;
 }
@@ -103,13 +103,13 @@ subnet 172.16.1.0 netmask 255.255.255.0 {
     range 172.16.1.100 172.16.1.200;
     option routers 172.16.1.1;
     option domain-name-servers 172.16.1.1;
-    option domain-name "test-alt";
+    option domain-name "test.alt";
     
     default-lease-time 600;
     max-lease-time 7200;
     
     ddns-updates on;
-    ddns-domainname "test-alt.";
+    ddns-domainname "test.alt.";
     ddns-rev-domainname "in-addr.arpa.";
     
     allow client-updates;
