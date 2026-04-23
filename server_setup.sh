@@ -1,84 +1,65 @@
 #!/bin/bash
-
 set -e
 
 ADMIN_PASS="Passw0rd123"
 
-echo "=== НАСТРОЙКА СЕРВЕРА ==="
+echo "=== ФИКС НАСТРОЙКИ СЕРВЕРА ==="
 
-# 1. Проверка интернета
-echo "Проверка интернета..."
-ip route del default via 172.16.1.1 dev enp0s8 2>/dev/null || true
-ip route add default via 10.0.2.2 dev enp0s3 2>/dev/null || true
-ping -c 2 8.8.8.8 || { echo "Нет интернета!"; exit 1; }
+# 1. Жесткий фикс интернета [cite: 1, 2]
+echo "Настройка маршрутов..."
+# Удаляем ВООБЩЕ все дефолты и ставим один рабочий 
+ip route flush default || true
+ip route add default via 10.0.2.2 dev enp0s3 || { echo "Ошибка шлюза!"; exit 1; } [cite: 3]
+ping -c 2 8.8.8.8 || { echo "Интернета всё еще нет!"; exit 1; } [cite: 3]
 
-# 2. Обновление
-apt-get update && apt-get dist-upgrade -y
+# 2. Обновление и установка 
+apt-get update && apt-get install -y task-samba-dc dhcp-server
 
-# 3. Установка Samba
-apt-get install -y task-samba-dc
-
-# 4. Создание домена
+# 3. Очистка перед provision 
+systemctl stop samba smb nmb 2>/dev/null || true
 rm -f /etc/samba/smb.conf
-rm -rf /var/lib/samba
+rm -rf /var/lib/samba/* rm -rf /var/cache/samba/*
+
+# 4. Создание домена 
 samba-tool domain provision \
     --use-rfc2307 \
-    --realm=TEST-ALT \
+    --realm=TEST.ALT \
     --domain=TEST \
     --server-role=dc \
     --dns-backend=SAMBA_INTERNAL \
     --adminpass="$ADMIN_PASS"
 
-# 5. Настройка DNS
+# 5. DNS Фикс (вставляем в Global) 
 cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
-echo "dns forwarder = 8.8.8.8" >> /etc/samba/smb.conf
+sed -i '/\[global\]/a \    dns forwarder = 8.8.8.8' /etc/samba/smb.conf
 
-# 6. ЗАПУСК САМБЫ (РАБОТАЕТ ЛЮБОЙ ВАРИАНТ)
+# 6. ЗАПУСК (Для Альта используем сервис samba) [cite: 5, 6]
 echo "Запуск Samba..."
-systemctl unmask samba-ad-dc 2>/dev/null || true
-systemctl enable samba-ad-dc 2>/dev/null || true
-systemctl start samba-ad-dc 2>/dev/null || true
+systemctl unmask samba
+systemctl enable --now samba
 
-systemctl unmask samba 2>/dev/null || true
-systemctl enable samba 2>/dev/null || true
-systemctl start samba 2>/dev/null || true
+# 7. Настройка внутреннего интерфейса (статикой) [cite: 9]
+# Чтобы не отвалилось, вешаем адрес явно
+ip addr flush dev enp0s8 || true
+ip addr add 172.16.1.1/24 dev enp0s8
 
-sleep 5
-
-# 7. Проверка
-if systemctl is-active --quiet samba-ad-dc || systemctl is-active --quiet samba; then
-    echo "✅ Samba работает"
-else
-    echo "❌ ОШИБКА: Samba не запустилась"
-    systemctl status samba-ad-dc --no-pager 2>/dev/null || true
-    systemctl status samba --no-pager 2>/dev/null || true
-    exit 1
-fi
-
-# 8. Внутренний интерфейс
-ip addr add 172.16.1.1/24 dev enp0s8 2>/dev/null || true
-
-# 9. DHCP
-apt-get install -y dhcp-server
-cat > /etc/dhcp/dhcpd.conf << 'EOF'
+# 8. DHCP (Конфиг без ошибок в синтаксисе) [cite: 10, 11]
+cat > /etc/dhcp/dhcpd.conf << EOF
 subnet 172.16.1.0 netmask 255.255.255.0 {
     range 172.16.1.100 172.16.1.200;
     option routers 172.16.1.1;
     option domain-name-servers 172.16.1.1;
-    option domain-name "test-alt";
-    host workstation {
-        hardware ethernet 08:00:27:ab:cd:ef;
-        fixed-address 172.16.1.99;
-    }
+    option domain-name "test.alt";
 }
 EOF
 echo 'DHCPDARGS="enp0s8"' > /etc/sysconfig/dhcpd
-systemctl enable dhcpd
-systemctl start dhcpd
+systemctl enable --now dhcpd
 
-# 10. NAT
+# 9. NAT [cite: 11]
 sysctl -w net.ipv4.ip_forward=1
+iptables -F
+iptables -t nat -F
 iptables -t nat -A POSTROUTING -o enp0s3 -j MASQUERADE
 iptables -A FORWARD -i enp0s8 -o enp0s3 -j ACCEPT
 
-echo "✅ ГОТОВО!"
+echo "✅ ТЕПЕРЬ ДОЛЖНО ВЗЛЕТЕТЬ!"
