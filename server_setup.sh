@@ -24,7 +24,7 @@ samba-tool domain provision --use-rfc2307 --realm=$REALM --domain=TEST \
   --server-role=dc --dns-backend=SAMBA_INTERNAL --adminpass="$ADMIN_PASS"
 
 # 4. TSIG Ключ для DDNS (как в билете)
-samba-tool domain exportkeytab /etc/dhcp/dhcp.keytab --principal=dc1$@$REALM
+samba-tool domain exportkeytab /etc/dhcp/dhcp.keytab --principal=dc1.${REALM}
 chown root:root /etc/dhcp/dhcp.keytab
 chmod 600 /etc/dhcp/dhcp.keytab
 
