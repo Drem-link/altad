@@ -4,38 +4,36 @@ set -e
 
 ADMIN_PASS="Passw0rd123"
 
-echo "=== НАСТРОЙКА СЕРВЕРА ==="
+echo "=== НАСТРОЙКА СЕРВЕРА ALT LINUX ==="
 
-# 1. ПРОВЕРКА ИНТЕРНЕТА
+# 1. Проверка интернета
 echo "Проверка интернета..."
 if ! ping -c 2 8.8.8.8 &>/dev/null; then
-    # Удаляем левый шлюз
     ip route del default via 172.16.1.1 dev enp0s8 2>/dev/null || true
-    # Добавляем правильный шлюз для VirtualBox NAT
     ip route add default via 10.0.2.2 dev enp0s3 2>/dev/null || true
 fi
 
-ping -c 2 8.8.8.8 || { echo "Нет интернета! Проверь сеть."; exit 1; }
+ping -c 2 8.8.8.8 || { echo "Нет интернета!"; exit 1; }
 
-# 2. ОБНОВЛЕНИЕ
+# 2. Обновление
 echo "Обновление системы..."
 apt-get update && apt-get dist-upgrade -y
 
-# 3. УДАЛЕНИЕ КОНФЛИКТУЮЩИХ СЛУЖБ
+# 3. Удаление конфликтующих DNS
 echo "Удаление конфликтующих DNS..."
 apt-get remove -y bind dnsmasq systemd-resolved 2>/dev/null || true
 
-# 4. УСТАНОВКА SAMBA
+# 4. Установка Samba
 echo "Установка Samba..."
 apt-get install -y task-samba-dc
 
-# 5. ОЧИСТКА СТАРЫХ КОНФИГОВ
+# 5. Очистка старых конфигов
 echo "Очистка старых конфигов..."
 rm -f /etc/samba/smb.conf
 rm -rf /var/lib/samba
 mkdir -p /var/lib/samba/sysvol /var/lib/samba/private
 
-# 6. СОЗДАНИЕ ДОМЕНА
+# 6. Создание домена
 echo "Создание домена TEST-ALT..."
 samba-tool domain provision \
     --use-rfc2307 \
@@ -45,26 +43,33 @@ samba-tool domain provision \
     --dns-backend=SAMBA_INTERNAL \
     --adminpass="$ADMIN_PASS"
 
-# 7. НАСТРОЙКА DNS FORWARDER
+# 7. Настройка DNS forwarder
 echo "Настройка DNS forwarder..."
 cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
 echo "dns forwarder = 8.8.8.8" >> /etc/samba/smb.conf
 
-# 8. ЗАПУСК SAMBA (ПРАВИЛЬНОЕ ИМЯ СЛУЖБЫ - samba)
+# 8. ЗАПУСК SAMBA - ПРАВИЛЬНОЕ ИМЯ СЛУЖБЫ!
 echo "Запуск Samba..."
 systemctl unmask samba
 systemctl enable samba
 systemctl start samba
-sleep 3
+sleep 5
 
-# 9. НАСТРОЙКА ВНУТРЕННЕГО ИНТЕРФЕЙСА
-echo "Настройка внутреннего интерфейса..."
-if ! ip addr show | grep -q "172.16.1.1"; then
-    ip addr add 172.16.1.1/24 dev enp0s8 2>/dev/null || true
-    ip link set enp0s8 up
+# 9. Проверка Samba
+if systemctl is-active --quiet samba; then
+    echo "Samba работает"
+else
+    echo "ОШИБКА: Samba не запустилась"
+    systemctl status samba --no-pager
+    exit 1
 fi
 
-# 10. НАСТРОЙКА DHCP
+# 10. Настройка внутреннего интерфейса
+echo "Настройка внутреннего интерфейса..."
+ip addr add 172.16.1.1/24 dev enp0s8 2>/dev/null || true
+ip link set enp0s8 up
+
+# 11. Настройка DHCP
 echo "Настройка DHCP..."
 apt-get install -y dhcp-server
 
@@ -89,44 +94,21 @@ echo 'DHCPDARGS="enp0s8"' > /etc/sysconfig/dhcpd
 systemctl enable dhcpd
 systemctl start dhcpd
 
-# 11. НАСТРОЙКА IPTABLES И NAT
-echo "Настройка iptables и NAT..."
+# 12. Настройка NAT и фаервола
+echo "Настройка iptables..."
 sysctl -w net.ipv4.ip_forward=1
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 
-# Очистка только FORWARD и NAT, чтобы не сбросить SSH
-iptables -F FORWARD 2>/dev/null || true
-iptables -t nat -F 2>/dev/null || true
-
-# Правила
-iptables -P INPUT DROP 2>/dev/null || true
-iptables -P FORWARD DROP 2>/dev/null || true
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -p tcp --dport 22 -s 172.16.1.2 -j ACCEPT
-iptables -A INPUT -p udp --dport 53 -s 172.16.1.0/24 -j ACCEPT
-iptables -A INPUT -p udp --dport 67 -s 172.16.1.0/24 -j ACCEPT
-
-# NAT и FORWARD
 iptables -t nat -A POSTROUTING -o enp0s3 -j MASQUERADE
 iptables -A FORWARD -i enp0s8 -o enp0s3 -j ACCEPT
-iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
 
+# Сохраняем правила
 iptables-save > /etc/sysconfig/iptables
 systemctl enable iptables
 systemctl start iptables
 
-# 12. ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ДЛЯ DHCP DNS ОБНОВЛЕНИЙ
-echo "Настройка обновлений DNS..."
-samba-tool user create dhcpuser --random-password 2>/dev/null || true
-samba-tool user setexpiry dhcpuser --noexpiry 2>/dev/null || true
-samba-tool group addmembers DnsAdmins dhcpuser 2>/dev/null || true
-samba-tool domain exportkeytab /etc/dhcp/dhcpd.keytab --principal=dhcpuser@TEST-ALT 2>/dev/null || true
-chown dhcpd:dhcpd /etc/dhcp/dhcpd.keytab 2>/dev/null || true
-systemctl restart dhcpd
-
 echo "=========================================="
-echo "ГОТОВО! ВСЕ НАСТРОЕНО!"
+echo "ГОТОВО!"
 echo "IP сервера: 172.16.1.1"
 echo "Пароль Administrator: $ADMIN_PASS"
 echo "=========================================="
