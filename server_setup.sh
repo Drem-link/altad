@@ -6,6 +6,13 @@ ADMIN_PASS="Passw0rd123"
 
 echo "=== НАСТРОЙКА СЕРВЕРА ALT LINUX ==="
 
+# 0. УБИВАЕМ ВСЁ, ЧТО ЗАНИМАЕТ ПОРТ 53
+echo "Очистка порта 53..."
+fuser -k 53/tcp 53/udp 2>/dev/null || true
+systemctl stop bind systemd-resolved dnsmasq named 2>/dev/null || true
+systemctl disable bind systemd-resolved dnsmasq named 2>/dev/null || true
+apt-get remove -y bind dnsmasq systemd-resolved 2>/dev/null || true
+
 # 1. Проверка интернета
 echo "Проверка интернета..."
 ip route del default via 172.16.1.1 dev enp0s8 2>/dev/null || true
@@ -15,18 +22,15 @@ ping -c 2 8.8.8.8 || { echo "Нет интернета!"; exit 1; }
 # 2. Обновление
 apt-get update && apt-get dist-upgrade -y
 
-# 3. Удаление конфликтующих DNS
-apt-get remove -y bind dnsmasq systemd-resolved 2>/dev/null || true
-
-# 4. Установка Samba
+# 3. Установка Samba
 apt-get install -y task-samba-dc
 
-# 5. Очистка старых конфигов
+# 4. Очистка старых конфигов
 rm -f /etc/samba/smb.conf
 rm -rf /var/lib/samba
 mkdir -p /var/lib/samba/sysvol /var/lib/samba/private
 
-# 6. Создание домена
+# 5. Создание домена
 samba-tool domain provision \
     --use-rfc2307 \
     --realm=TEST-ALT \
@@ -35,21 +39,29 @@ samba-tool domain provision \
     --dns-backend=SAMBA_INTERNAL \
     --adminpass="$ADMIN_PASS"
 
-# 7. Настройка DNS
+# 6. Настройка DNS
 cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
 echo "dns forwarder = 8.8.8.8" >> /etc/samba/smb.conf
 
-# 8. ЗАПУСК SAMBA (ПРОСТО SAMBA)
+# 7. ЗАПУСК SAMBA
 systemctl enable samba
-systemctl start samba
+systemctl restart samba
 sleep 3
 
-# 9. Проверка
+# 8. Проверка порта 53 (должен быть samba)
+if ss -tlnp | grep -q ":53.*samba"; then
+    echo "✅ Порт 53 занят Samba"
+else
+    echo "❌ Порт 53 не слушается Samba"
+    ss -tlnp | grep :53
+fi
+
+# 9. Проверка Samba
 if systemctl is-active --quiet samba; then
     echo "✅ Samba работает"
 else
     echo "❌ Ошибка запуска Samba"
-    systemctl status samba --no-pager
+    journalctl -u samba -n 10 --no-pager
     exit 1
 fi
 
@@ -65,9 +77,6 @@ subnet 172.16.1.0 netmask 255.255.255.0 {
     option routers 172.16.1.1;
     option domain-name-servers 172.16.1.1;
     option domain-name "test-alt";
-    
-    default-lease-time 600;
-    max-lease-time 7200;
     
     host workstation {
         hardware ethernet 08:00:27:ab:cd:ef;
