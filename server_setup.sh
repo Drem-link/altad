@@ -77,7 +77,6 @@ samba-tool domain provision \
     --domain=TEST \
     --server-role=dc \
     --dns-backend=SAMBA_INTERNAL \
-    --dns-forwarder=8.8.8.8 \
     --adminpass="$ADMIN_PASS" \
     --option="interfaces=lo enp0s8" \
     --option="bind interfaces only=yes"
