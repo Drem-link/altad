@@ -1,90 +1,95 @@
 #!/bin/bash
+
 set -e
 
 ADMIN_PASS="Passw0rd123"
-REALM="TEST.ALT"
-DOMAIN="TEST"
-SERVER_IP="172.16.1.1"
 
-echo "=== ФИНАЛЬНЫЙ ФИКС ДЛЯ БИЛЕТА №11 ==="
+echo "=== НАСТРОЙКА СЕРВЕРА ALT LINUX ==="
 
-# 1. Сеть для интернета
-ip route flush default || true
-ip route add default via 10.0.2.2 dev enp0s3 || true
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
+# 1. Проверка интернета
+echo "Проверка интернета..."
+ip route del default via 172.16.1.1 dev enp0s8 2>/dev/null || true
+ip route add default via 10.0.2.2 dev enp0s3 2>/dev/null || true
+ping -c 2 8.8.8.8 || { echo "Нет интернета!"; exit 1; }
 
-# 2. Установка пакетов
-apt-get update
-apt-get install -y task-samba-dc dhcp-server bind-utils || apt-get install -y task-samba-dc dhcp-server bind9-utils
+# 2. Обновление
+apt-get update && apt-get dist-upgrade -y
 
-# 3. ПОЛНАЯ ОЧИСТКА И СОЗДАНИЕ ПУТЕЙ (решает твою новую ошибку)
-systemctl stop samba dhcpd 2>/dev/null || true
-rm -rf /var/lib/samba/*
-rm -rf /etc/samba/smb.conf
-mkdir -p /var/lib/samba/private
-chmod 700 /var/lib/samba/private
+# 3. Удаление конфликтующих DNS
+apt-get remove -y bind dnsmasq systemd-resolved 2>/dev/null || true
 
-# 4. РАЗВЕРТЫВАНИЕ AD
-# Добавлен ключ --host-ip, чтобы Samba не ругалась на 10.0.2.15
+# 4. Установка Samba
+apt-get install -y task-samba-dc
+
+# 5. Очистка старых конфигов
+rm -f /etc/samba/smb.conf
+rm -rf /var/lib/samba
+mkdir -p /var/lib/samba/sysvol /var/lib/samba/private
+
+# 6. Создание домена
 samba-tool domain provision \
-  --use-rfc2307 \
-  --realm=$REALM \
-  --domain=$DOMAIN \
-  --server-role=dc \
-  --dns-backend=SAMBA_INTERNAL \
-  --adminpass="$ADMIN_PASS" \
-  --host-ip=$SERVER_IP
+    --use-rfc2307 \
+    --realm=TEST-ALT \
+    --domain=TEST \
+    --server-role=dc \
+    --dns-backend=SAMBA_INTERNAL \
+    --adminpass="$ADMIN_PASS"
 
-# 5. Керберос и запуск
-cp -f /var/lib/samba/private/krb5.conf /etc/krb5.conf
-systemctl unmask samba
-systemctl enable --now samba
-echo "Спим 15 сек..."
-sleep 15
+# 7. Настройка DNS
+cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+echo "dns forwarder = 8.8.8.8" >> /etc/samba/smb.conf
 
-# 6. ЭКСПОРТ КЛЮЧА (пробуем разные варианты имени хоста)
-samba-tool domain exportkeytab /etc/dhcp/dhcp.keytab --principal=dc\$@$REALM || \
-samba-tool domain exportkeytab /etc/dhcp/dhcp.keytab --principal=Administrator@$REALM
+# 8. ЗАПУСК SAMBA (ПРОСТО SAMBA)
+systemctl enable samba
+systemctl start samba
+sleep 3
 
-chown root:root /etc/dhcp/dhcp.keytab
-chmod 600 /etc/dhcp/dhcp.keytab
+# 9. Проверка
+if systemctl is-active --quiet samba; then
+    echo "✅ Samba работает"
+else
+    echo "❌ Ошибка запуска Samba"
+    systemctl status samba --no-pager
+    exit 1
+fi
 
-# 7. DHCP (Билет №11)
-cat > /etc/dhcp/dhcpd.conf << EOF
-ddns-update-style interim;
-ignore client-updates;
-update-static-leases on;
+# 10. Внутренний интерфейс
+ip addr add 172.16.1.1/24 dev enp0s8 2>/dev/null || true
+ip link set enp0s8 up
 
+# 11. DHCP
+apt-get install -y dhcp-server
+cat > /etc/dhcp/dhcpd.conf << 'EOF'
 subnet 172.16.1.0 netmask 255.255.255.0 {
     range 172.16.1.100 172.16.1.200;
-    option routers $SERVER_IP;
-    option domain-name-servers $SERVER_IP;
-    option domain-name "test.alt";
-    ddns-domainname "test.alt";
-    ddns-rev-domainname "in-addr.arpa.";
-
+    option routers 172.16.1.1;
+    option domain-name-servers 172.16.1.1;
+    option domain-name "test-alt";
+    
+    default-lease-time 600;
+    max-lease-time 7200;
+    
     host workstation {
         hardware ethernet 08:00:27:ab:cd:ef;
         fixed-address 172.16.1.99;
     }
 }
 EOF
-
 echo 'DHCPDARGS="enp0s8"' > /etc/sysconfig/dhcpd
-systemctl enable --now dhcpd
+systemctl enable dhcpd
+systemctl start dhcpd
 
-# 8. IPTABLES (Строго по билету)
-iptables -F
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT ACCEPT
-iptables -A INPUT -p tcp -s 172.16.1.2 --dport 22 -j ACCEPT
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -s 172.16.1.0/24 -j ACCEPT
-iptables -A FORWARD -s 172.16.1.0/24 -j ACCEPT
-iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -t nat -A POSTROUTING -o enp0s3 -j MASQUERADE
+# 12. NAT
 sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+iptables -t nat -A POSTROUTING -o enp0s3 -j MASQUERADE
+iptables -A FORWARD -i enp0s8 -o enp0s3 -j ACCEPT
+iptables-save > /etc/sysconfig/iptables
+systemctl enable iptables
+systemctl start iptables
 
-echo "✅ ТЕПЕРЬ ВСЁ ДОЛЖНО ВЗЛЕТЕТЬ!"
+echo "=========================================="
+echo "✅ СЕРВЕР НАСТРОЕН!"
+echo "IP сервера: 172.16.1.1"
+echo "Пароль Administrator: $ADMIN_PASS"
+echo "=========================================="
