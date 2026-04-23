@@ -1,54 +1,28 @@
 #!/bin/bash
+set -e
 
-ADMIN_PASS="Passw0rd123"
-SERVER_IP="172.16.1.1"
+# 1. Настройка интернета (чтобы пакеты скачались)
+# Укажи IP своего сервера как шлюз и DNS
+ip route flush default || true
+ip route add default via 172.16.1.1 dev enp0s3 || true
+echo "nameserver 172.16.1.1" > /etc/resolv.conf
 
-echo "=== НАСТРОЙКА КЛИЕНТА ==="
-
-# 1. КОПИРУЕМ resolv.conf с сервера (чтобы не ебаться)
-echo "Копируем DNS-настройки с сервера..."
-scp root@$SERVER_IP:/etc/resolv.conf /etc/resolv.conf 2>/dev/null || {
-    echo "Не скопировалось — прописываем вручную"
-    echo "nameserver $SERVER_IP" > /etc/resolv.conf
-    echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-    echo "search test-alt" >> /etc/resolv.conf
-}
-
-# 2. ЗАЩИТА resolv.conf от перезаписи
-chattr +i /etc/resolv.conf
-
-# 3. СТАВИМ ПАКЕТЫ (минимум, но рабочий)
+# 2. Установка софта
 apt-get update
-apt-get install -y task-auth-ad-sssd krb5-workstation realmd
+apt-get install -y sssd sssd-ad sssd-krb5 adcli realmd krb5-utils samba-common-tools
 
-# 4. KERBEROS
-cat > /etc/krb5.conf << EOF
-[libdefaults]
-    default_realm = TEST-ALT
-    dns_lookup_realm = false
-    dns_lookup_kdc = true
+# 3. Подготовка к вводу в домен
+echo "Passw0rd123" | kinit Administrator@TEST.ALT
 
-[realms]
-    TEST-ALT = {
-        kdc = $SERVER_IP
-        admin_server = $SERVER_IP
-    }
+# 4. Ввод в домен (Билет №11)
+realm join --user=Administrator TEST.ALT << EOF
+Passw0rd123
 EOF
 
-# 5. ВВОД В ДОМЕН БЕЗ ПИЗДЕЖА
-echo "Ввод в домен..."
-echo "$ADMIN_PASS" | realm join --user=administrator TEST-ALT 2>/dev/null || {
-    echo "realm join не сработал — пробуем net ads"
-    echo "$ADMIN_PASS" | net ads join -U Administrator -S $SERVER_IP
-}
+# 5. Настройка SSSD (чтобы пускало доменных юзеров)
+systemctl enable --now sssd
 
-# 6. РАЗРЕШАЕМ ДОМЕННЫМ ПОЛЬЗОВАТЕЛЯМ ВХОД
-echo "session optional pam_mkhomedir.so skel=/etc/skel umask=0077" >> /etc/pam.d/common-session
+# 6. Настройка автоматического создания домашних папок
+control switch system-policy-mkhomedir enabled
 
-# 7. КОНФИГ sssd (если нужно)
-systemctl restart sssd
-
-echo "=========================================="
-echo "ГОТОВО. Перезагрузи: reboot"
-echo "Вход: TEST\\administrator пароль $ADMIN_PASS"
-echo "=========================================="
+echo "=== КЛИЕНТ ВВЕДЕН В ДОМЕН ==="
